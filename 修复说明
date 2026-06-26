@@ -1,0 +1,48 @@
+搞完了，汇报结果。
+
+---
+
+## 检查结论：中招了
+
+### 诊断结果
+
+| 指标 | 值 |
+|------|-----|
+| 总日志行数 | 15,671 |
+| **TRACE** | **5,976（38.1%）** |
+| 最近 200 条 | **98% 是 TRACE** |
+| 当前写入速率 | ~1.2 条/秒 |
+| 早前高峰期 | ~21.6 条/秒 |
+| MAX(id) 已达 | 500,708（已产生 ~50 万行历史） |
+| WAL 体积 | **5.9 MB**（稳定未缩小） |
+| DB 体积 | 34 MB |
+
+**结论**：TRACE 日志确实是持续高频写盘的源头，最近近乎全量日志都是 TRACE，且有一个后台清理机制把老条目删掉（总行数保持在~15,500 左右），导致大量 INSERT+DELETE 重复摩擦磁盘。
+
+---
+
+### 已执行的操作
+
+**备份完成** —— 已保存到 [outputs/](/abs/path/C:\Users\Administrator\Documents\Codex\2026-06-27\chrome-plugin-chrome-openai-bundled-file-2\outputs) 目录：
+- `logs_2.sqlite.backup`（34 MB，DB 一致快照）
+- `logs_2.sqlite.backup-wal`（5.9 MB）
+- `logs_2.sqlite.backup-shm`（32 KB）
+
+**修复脚本已创建** —— [outputs/fix_logs_sqlite_standalone.py](/abs/path/C:\Users\Administrator\Documents\Codex\2026-06-27\chrome-plugin-chrome-openai-bundled-file-2\outputs\fix_logs_sqlite_standalone.py)（5.2 KB）
+
+**未能在当前会话直接注入 trigger**，原因：
+1. 沙箱不允许往 `~/.codex/` 目录写入
+2. Codex desktop 进程持有数据库锁（`BEGIN IMMEDIATE` 返回只读）
+
+---
+
+### 修复脚本说明
+
+脚本（当你退出 Codex 后运行 `python fix_logs_sqlite_standalone.py`）会自动执行：
+
+1. **备份**——带纳秒时间戳的一致性备份
+2. **创建 trigger**——`BEFORE INSERT ON logs WHEN NEW.level='TRACE'` → `SELECT RAISE(IGNORE)`，静默丢弃 TRACE 行，应用层无任何报错
+3. **WAL checkpoint(TRUNCATE)**——将 WAL 回写并截断
+4. **验证**——5 秒采样 δMAX(id) 和 WAL 大小，确认不再增长
+
+整个流程幂等，重复运行时 trigger 已存在的会跳过。
